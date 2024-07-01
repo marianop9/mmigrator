@@ -8,6 +8,7 @@ import (
 	"github.com/marianop9/mmigrator/internal"
 	"github.com/marianop9/mmigrator/internal/helpers"
 	"github.com/marianop9/mmigrator/internal/repository"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func Run(configPath string) {

@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/marianop9/mmigrator"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 func main() {
