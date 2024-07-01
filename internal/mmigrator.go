@@ -9,102 +9,72 @@ import (
 	"github.com/marianop9/mmigrator/internal/types"
 )
 
+type folderScan map[string][]string
+
 type Mmigrator struct {
-	repo            types.Repository
-	migrationFolder string
+	migrationsFolder string
+	repo             types.Repository
 }
 
-func NewMmigrator(repo types.Repository, migrrationFolder string) Mmigrator {
+func New(repo types.Repository, migrationsFolder string) Mmigrator {
 	return Mmigrator{
-		repo,
-		migrrationFolder,
+		repo:             repo,
+		migrationsFolder: migrationsFolder,
 	}
 }
 
 func (mm Mmigrator) Update(ctx context.Context) error {
-	if err := mm.repo.EnsureCreated(); err != nil {
+	var err error
+
+	if err = mm.repo.EnsureCreated(); err != nil {
 		return err
 	}
 
-	newGroups, err := scanMigrationsFolder(mm.migrationFolder)
+	fmt.Printf("scanning migration folder: %s\n", mm.migrationsFolder)
+	folderScan, err := scanMigrationsFolder(mm.migrationsFolder)
 	if err != nil {
 		return err
 	}
 
+	fmt.Println("retrieving previous migrations...")
 	oldGroups, err := mm.repo.SummarizeMigrations()
 	if err != nil {
 		return fmt.Errorf("failed to retrieve migration summary: %w", err)
 	}
 
-	groupsToUpdate := getGroupsToUpdate(oldGroups, newGroups)
+	// get groups that need to be updated
+	groupsToUpdate := compareMigrations(oldGroups, folderScan)
 	if len(groupsToUpdate) == 0 {
-		fmt.Println("all migrations are up to date!")
+		fmt.Println("all migrations are up to date")
+		return nil
+	}
+	// fmt.Printf("groupsToUpdate: %#v\n", groupsToUpdate)
+
+	// determine migrations not yet run
+	groupsToExecute, err := mm.getExecutionGroups(oldGroups, groupsToUpdate)
+	if err != nil {
+		return err
 	}
 
-	// list of groups to execute
-	// contain only migrations that have not been run yet
-	groupsToExecute := make([]types.MigrationGroup, len(groupsToUpdate))
-
-	for i, group := range groupsToUpdate {
-		existingMigrationNames, err := mm.repo.GetMigrationsByGroup(group.GroupId)
-		if err != nil {
-			return fmt.Errorf("failed to retrieve migration names: %w", err)
-		}
-
-		executionGroup := types.MigrationGroup{
-			GroupId:    group.GroupId,
-			Name:       group.Name,
-			Migrations: make([]types.Migration, 0),
-		}
-
-		// look for migrations not tracked by the previous version
-		for _, migration := range group.Migrations {
-			if sliceContains(existingMigrationNames, migration.Name) {
-				continue
-			}
-
-			// get handle to new migration file
-			filePath := path.Join(mm.migrationFolder, group.Name, migration.Name)
-
-			migration.FileHandle, err = os.Open(filePath)
-			if err != nil {
-				return fmt.Errorf("failed to open '%s': %w", filePath, err)
-			}
-
-			// add migration to execution group
-			executionGroup.Migrations = append(executionGroup.Migrations, migration)
-		}
-
-		// add execution group to list
-		groupsToExecute[i] = executionGroup
-	}
-
-	mm.repo.ExecuteMigrations(groupsToExecute)
-
-	return nil
+	return mm.repo.ExecuteMigrations(groupsToExecute)
 }
 
-func scanMigrationsFolder(basePath string) ([]types.MigrationGroup, error) {
+func scanMigrationsFolder(basePath string) (map[string][]string, error) {
 	migrationDirs, err := os.ReadDir(basePath)
 	if err != nil {
 		return nil, err
 	}
 
-	migrationGroups := make([]types.MigrationGroup, len(migrationDirs))
-	for i, dir := range migrationDirs {
+	migrationGroups := make(map[string][]string, len(migrationDirs))
+	for _, dir := range migrationDirs {
 		if !dir.IsDir() {
 			return nil, types.ErrOnlyDirsInMigrationsFolder
 		}
 
-		migrationGroups[i] = types.MigrationGroup{
-			GroupId:    0,
-			Name:       dir.Name(),
-			Migrations: make([]types.Migration, 0),
-		}
+		migrationGroups[dir.Name()] = []string{}
 	}
 
-	for i := range migrationGroups {
-		groupName := migrationGroups[i].Name
+	for groupName := range migrationGroups {
 		groupPath := path.Join(basePath, groupName)
 
 		entries, err := os.ReadDir(groupPath)
@@ -114,47 +84,96 @@ func scanMigrationsFolder(basePath string) ([]types.MigrationGroup, error) {
 
 		for _, entry := range entries {
 			if entry.IsDir() || path.Ext(entry.Name()) != ".sql" {
-				return nil, fmt.Errorf("%s: %v", groupName, types.ErrOnlyFilesInGroupFolder)
+				return nil, fmt.Errorf("%s: %w", groupName, types.ErrOnlyFilesInGroupFolder)
 			}
-			migration := types.Migration{
-				Name:       entry.Name(),
-				FileHandle: nil,
-			}
-			migrationGroups[i].Migrations = append(migrationGroups[i].Migrations, migration)
+			migrationGroups[groupName] = append(migrationGroups[groupName], entry.Name())
 		}
 	}
 
 	return migrationGroups, nil
 }
 
-func getGroupsToUpdate(
-	oldGroups []types.MigrationGroupSummary,
-	newGroups []types.MigrationGroup,
-) []types.MigrationGroup {
-	groupsToUpdate := make([]types.MigrationGroup, 0)
+func compareMigrations(oldGroups []types.GroupSummary, folderScan folderScan) folderScan {
 	// compare migration groups from folder and db
 	for _, old := range oldGroups {
-		new := findByName(newGroups, old.Name)
-		if new == nil {
+		files, ok := folderScan[old.Name]
+		if !ok {
 			fmt.Printf("WARNING: previously executed group %s not found in migrations folder\n", old.Name)
 			continue
 		}
 
-		if old.MigrationCount < len(new.Migrations) {
-			// this group has new files
-			// save the groupId and add to list
-			new.GroupId = old.GroupId
-			groupsToUpdate = append(groupsToUpdate, *new)
-		} else if old.MigrationCount > len(new.Migrations) {
+		if old.MigrationCount == len(files) {
+			delete(folderScan, old.Name)
+		} else if old.MigrationCount > len(files) {
 			// the current version of the group has less files than the one saved on db
 			fmt.Printf("WARNING: group '%s' has less migrations than the previous version\n", old.Name)
+			delete(folderScan, old.Name)
 		}
 	}
 
-	return groupsToUpdate
+	return folderScan
 }
 
-func findByName(groups []types.MigrationGroup, name string) *types.MigrationGroup {
+func (mm Mmigrator) getExecutionGroups(oldGroups []types.GroupSummary, groupsToUpdate folderScan) ([]types.Group, error) {
+	executionGroups := make([]types.Group, 0, len(groupsToUpdate))
+
+	for group, units := range groupsToUpdate {
+		oldGroup := findByName(oldGroups, group)
+
+		groupId := 0
+		oldUnits := []string{}
+
+		if oldGroup != nil {
+			groupId = oldGroup.GroupId
+
+			var err error
+			if oldUnits, err = mm.repo.GetMigrationsByGroup(groupId); err != nil {
+				return nil, err
+			}
+		}
+
+		executionUnits, err := getExecutionUnits(mm.migrationsFolder, group, oldUnits, units)
+		if err != nil {
+			return nil, err
+		}
+
+		group := types.Group{
+			GroupId: groupId,
+			Name:    group,
+			Units:   executionUnits,
+		}
+		executionGroups = append(executionGroups, group)
+	}
+
+	return executionGroups, nil
+}
+
+func getExecutionUnits(migrationsFolder, groupName string, oldMigrations []string, newMigrations []string) ([]types.Unit, error) {
+	units := make([]types.Unit, 0)
+
+	// look for migrations not tracked by the previous version
+	for _, migration := range newMigrations {
+		if sliceContains(oldMigrations, migration) {
+			continue
+		}
+
+		// get handle to new migration file
+		filePath := path.Join(migrationsFolder, groupName, migration)
+
+		fileHandle, err := os.Open(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open '%s': %w", filePath, err)
+		}
+
+		units = append(units, types.Unit{
+			Name:       migration,
+			FileHandle: fileHandle,
+		})
+	}
+	return units, nil
+}
+
+func findByName(groups []types.GroupSummary, name string) *types.GroupSummary {
 	for _, group := range groups {
 		if group.Name == name {
 			return &group

@@ -3,7 +3,7 @@ package helpers
 import "testing"
 
 func Test(t *testing.T) {
-	path := "../../test/mmigrator-config.json"
+	path := "../../test"
 
 	config, err := GetConfiguration(path)
 
@@ -12,7 +12,7 @@ func Test(t *testing.T) {
 	}
 
 	expectedConnString := "test.db"
-	expectedMigFolder := "test/migrationFolder"
+	expectedMigFolder := "test/migrationsFolder"
 	if config.ConnectionString != expectedConnString {
 		t.Fatalf("connectionString: expected %s, got %s", expectedConnString, config.ConnectionString)
 	}

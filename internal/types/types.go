@@ -7,26 +7,26 @@ type Config struct {
 	ConnectionString string
 }
 
-type Migration struct {
+type Unit struct {
 	Name       string
 	FileHandle io.Reader
 }
 
-type MigrationGroupSummary struct {
+type GroupSummary struct {
 	GroupId        int    `db:"group_id"`
 	Name           string `db:"name"`
 	MigrationCount int    `db:"migration_count"`
 }
 
-type MigrationGroup struct {
-	GroupId    int
-	Name       string
-	Migrations []Migration
+type Group struct {
+	GroupId int
+	Name    string
+	Units   []Unit
 }
 
 type Repository interface {
 	EnsureCreated() error
-	SummarizeMigrations() ([]MigrationGroupSummary, error)
+	SummarizeMigrations() ([]GroupSummary, error)
 	GetMigrationsByGroup(groupId int) ([]string, error)
-	ExecuteMigrations([]MigrationGroup) error
+	ExecuteMigrations([]Group) error
 }
