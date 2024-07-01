@@ -1,0 +1,4 @@
+{
+    "migrationFolder": "test/migrationFolder",
+    "connectionString": "test.db"
+}
